@@ -1,0 +1,42 @@
+name: Daily Healthy Jain Dinner Email
+
+on:
+  schedule:
+    # 12:00 PM Pacific Time
+    # GitHub Actions uses UTC
+    # 12:00 PM PT = 20:00 UTC (standard time)
+    # When daylight saving time starts, this will be 19:00 UTC
+    - cron: "0 20 * * *"
+
+  # Allows you to run it manually from GitHub (very useful for testing)
+  workflow_dispatch:
+
+jobs:
+  send-dinner-email:
+    runs-on: ubuntu-latest
+
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      OPENWEATHER_API_KEY: ${{ secrets.OPENWEATHER_API_KEY }}
+      LOCATION: ${{ secrets.LOCATION }}
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run dinner generator
+        run: python main.py
