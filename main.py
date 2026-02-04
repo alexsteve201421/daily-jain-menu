@@ -9,13 +9,50 @@ import requests
 
 
 # -------------------------------------------------
-# STEP 1: Get dinner-time weather (closest to 7:00 PM local time)
+# Weather A: CURRENT weather at send time
 # -------------------------------------------------
-def get_dinner_weather(location: str, api_key: str, dinner_hour_local: int = 19) -> dict:
+def get_current_weather(location: str, api_key: str) -> dict:
     """
-    Uses OpenWeather 5-day/3-hour forecast and selects the forecast entry closest
-    to dinner time (default 7:00 PM) in the CITY'S local time.
-    DST is handled via OpenWeather city timezone offset (seconds from UTC).
+    Gets current weather (now) for the location.
+    Uses OpenWeather Current Weather endpoint.
+    """
+    url = "https://api.openweathermap.org/data/2.5/weather"
+    params = {"q": location, "appid": api_key, "units": "imperial"}
+
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+
+    tz_offset_seconds = int(data.get("timezone", 0))
+    tz = timezone(timedelta(seconds=tz_offset_seconds))
+
+    # OpenWeather gives dt (UTC timestamp of observation)
+    dt_utc = datetime.fromtimestamp(int(data.get("dt", 0)), tz=timezone.utc)
+    dt_local = dt_utc.astimezone(tz)
+
+    main = data.get("main", {})
+    w = (data.get("weather") or [{}])[0]
+    wind = data.get("wind", {})
+
+    return {
+        "location": location,
+        "observed_time_local": dt_local.strftime("%Y-%m-%d %I:%M %p"),
+        "temp_f": main.get("temp"),
+        "feels_like_f": main.get("feels_like"),
+        "humidity_pct": main.get("humidity"),
+        "conditions": w.get("description"),
+        "wind_mph": wind.get("speed"),
+    }
+
+
+# -------------------------------------------------
+# Weather B: DINNER forecast closest to 7:00 PM local time
+# -------------------------------------------------
+def get_dinner_forecast(location: str, api_key: str, dinner_hour_local: int = 19) -> dict:
+    """
+    Uses OpenWeather 5-day/3-hour forecast and selects the entry closest
+    to dinner time (default 7:00 PM) in the city's local time.
+    DST is handled via OpenWeather's city timezone offset.
     """
     url = "https://api.openweathermap.org/data/2.5/forecast"
     params = {"q": location, "appid": api_key, "units": "imperial"}
@@ -29,6 +66,8 @@ def get_dinner_weather(location: str, api_key: str, dinner_hour_local: int = 19)
     tz = timezone(timedelta(seconds=tz_offset_seconds))
 
     now_local = datetime.now(tz)
+
+    # Target is the NEXT occurrence of 7:00 PM local time
     target_local = now_local.replace(hour=dinner_hour_local, minute=0, second=0, microsecond=0)
     if now_local >= target_local:
         target_local = target_local + timedelta(days=1)
@@ -55,22 +94,20 @@ def get_dinner_weather(location: str, api_key: str, dinner_hour_local: int = 19)
 
     return {
         "location": location,
+        "dinner_hour_local": dinner_hour_local,
         "forecast_time_local": chosen_local.strftime("%Y-%m-%d %I:%M %p"),
-        "forecast_time_utc": chosen_utc.strftime("%Y-%m-%d %H:%M:%S"),
         "temp_f": main.get("temp"),
         "feels_like_f": main.get("feels_like"),
         "humidity_pct": main.get("humidity"),
         "conditions": w.get("description"),
         "wind_mph": wind.get("speed"),
-        "tz_offset_seconds": tz_offset_seconds,
-        "dinner_hour_local": dinner_hour_local,
     }
 
 
 # -------------------------------------------------
-# STEP 2: OpenAI generates a HEALTHY Jain menu (STRICT JSON)
+# OpenAI: generate HEALTHY Jain menu (STRICT JSON)
 # -------------------------------------------------
-def generate_jain_menu(weather: dict) -> dict:
+def generate_jain_menu(dinner_forecast: dict) -> dict:
     api_key = os.environ["OPENAI_API_KEY"]
 
     system_prompt = (
@@ -89,15 +126,17 @@ def generate_jain_menu(weather: dict) -> dict:
     )
 
     user_prompt = f"""
-Dinner-time weather for {weather["location"]} (closest forecast to {weather["dinner_hour_local"]}:00 local):
-{json.dumps(weather, indent=2)}
+The menu MUST be based on the DINNER-TIME FORECAST (around 7:00 PM local), not the current weather.
+
+Dinner-time forecast for {dinner_forecast["location"]}:
+{json.dumps(dinner_forecast, indent=2)}
 
 Create a COMPLETE Indian Jain dinner menu with:
 • 1 Appetizer
 • 1 Main (include a simple side if appropriate)
 • 1 Dessert
 
-Make the menu fit the weather:
+Make the menu fit the dinner-time forecast:
 - Cold / windy / rainy → warm, comforting foods
 - Hot / humid → lighter, cooling foods
 - Mild → balanced, healthy meal
@@ -179,7 +218,7 @@ Rules:
 
 
 # -------------------------------------------------
-# STEP 3: Email send (Gmail SMTP)
+# Email
 # -------------------------------------------------
 def send_email(subject: str, body: str) -> None:
     email_from = os.environ["EMAIL_FROM"]
@@ -199,25 +238,37 @@ def send_email(subject: str, body: str) -> None:
         server.send_message(msg)
 
 
-# -------------------------------------------------
-# STEP 4: Email formatting (professional)
-# -------------------------------------------------
-def format_email(weather: dict, menu: dict) -> str:
+def format_email(current_weather: dict, dinner_forecast: dict, menu: dict) -> str:
     def section(title: str) -> str:
         return f"\n{'=' * len(title)}\n{title}\n{'=' * len(title)}\n"
 
     lines = []
     lines.append(menu.get("title", "Tonight’s Healthy Jain Menu"))
     lines.append("")
-    lines.append("Dinner-time Weather:")
-    lines.append(f"- Location: {weather.get('location')}")
-    lines.append(f"- Forecast (local): {weather.get('forecast_time_local')}")
-    lines.append(f"- Temp: {weather.get('temp_f')}°F (feels {weather.get('feels_like_f')}°F)")
-    lines.append(f"- Conditions: {weather.get('conditions')}")
-    lines.append(f"- Wind: {weather.get('wind_mph')} mph | Humidity: {weather.get('humidity_pct')}%")
+    lines.append("Menu logic:")
+    lines.append("- The MENU is based on the DINNER-TIME FORECAST (around 7:00 PM local).")
+    lines.append("- The CURRENT WEATHER below is shown only for reference at send-time.")
+    lines.append("")
+
+    # CURRENT weather block (send-time)
+    lines.append(section("CURRENT WEATHER (AT SEND TIME)"))
+    lines.append(f"- Location: {current_weather.get('location')}")
+    lines.append(f"- Observed (local): {current_weather.get('observed_time_local')}")
+    lines.append(f"- Temp: {current_weather.get('temp_f')}°F (feels {current_weather.get('feels_like_f')}°F)")
+    lines.append(f"- Conditions: {current_weather.get('conditions')}")
+    lines.append(f"- Wind: {current_weather.get('wind_mph')} mph | Humidity: {current_weather.get('humidity_pct')}%")
+
+    # DINNER forecast block (menu is based on this)
+    lines.append(section("DINNER FORECAST (MENU IS BASED ON THIS)"))
+    lines.append(f"- Target: ~{dinner_forecast.get('dinner_hour_local')}:00 local")
+    lines.append(f"- Forecast time (local): {dinner_forecast.get('forecast_time_local')}")
+    lines.append(f"- Temp: {dinner_forecast.get('temp_f')}°F (feels {dinner_forecast.get('feels_like_f')}°F)")
+    lines.append(f"- Conditions: {dinner_forecast.get('conditions')}")
+    lines.append(f"- Wind: {dinner_forecast.get('wind_mph')} mph | Humidity: {dinner_forecast.get('humidity_pct')}%")
     lines.append("")
     lines.append(menu.get("weather_fit_summary", ""))
 
+    # Appetizer
     a = menu["menu"]["appetizer"]
     lines.append(section("APPETIZER"))
     lines.append(f"{a['name']}  •  {a['time_minutes']} min  •  Serves {a['servings']}")
@@ -230,6 +281,7 @@ def format_email(weather: dict, menu: dict) -> str:
     if a.get("plating_note"):
         lines.append(f"\nPlating note: {a['plating_note']}")
 
+    # Main + side
     m = menu["menu"]["main"]
     lines.append(section("MAIN"))
     lines.append(f"{m['name']}  •  {m['time_minutes']} min  •  Serves {m['servings']}")
@@ -254,6 +306,7 @@ def format_email(weather: dict, menu: dict) -> str:
     if m.get("plating_note"):
         lines.append(f"\nPlating note: {m['plating_note']}")
 
+    # Dessert
     d = menu["menu"]["dessert"]
     lines.append(section("DESSERT"))
     lines.append(f"{d['name']}  •  {d['time_minutes']} min  •  Serves {d['servings']}")
@@ -266,6 +319,7 @@ def format_email(weather: dict, menu: dict) -> str:
     if d.get("plating_note"):
         lines.append(f"\nPlating note: {d['plating_note']}")
 
+    # Shopping list
     lines.append(section("SHOPPING LIST"))
     shopping = menu.get("shopping_list", {})
     for cat in ["produce", "pantry", "dairy", "spices"]:
@@ -276,6 +330,7 @@ def format_email(weather: dict, menu: dict) -> str:
                 lines.append(f"- {x}")
             lines.append("")
 
+    # Jain notes
     notes = menu.get("jain_compliance_notes", [])
     if notes:
         lines.append(section("JAIN COMPLIANCE"))
@@ -285,23 +340,21 @@ def format_email(weather: dict, menu: dict) -> str:
     return "\n".join(lines)
 
 
-# -------------------------------------------------
-# STEP 5: Main
-# -------------------------------------------------
 def main():
-    # Default location is Baltimore, MD, US — override by setting LOCATION secret
+    # Default to Baltimore. Override with LOCATION secret if you want.
     location = os.environ.get("LOCATION", "Baltimore,MD,US")
+    ow_key = os.environ["OPENWEATHER_API_KEY"]
 
-    weather = get_dinner_weather(
-        location=location,
-        api_key=os.environ["OPENWEATHER_API_KEY"],
-        dinner_hour_local=19,  # 7 PM local
-    )
+    # Weather shown in email: NOW
+    current_weather = get_current_weather(location, ow_key)
 
-    menu = generate_jain_menu(weather)
+    # Weather used for menu: dinner-time forecast near 7 PM
+    dinner_forecast = get_dinner_forecast(location, ow_key, dinner_hour_local=19)
 
-    subject = f"Healthy Jain Dinner Plan – {datetime.now().strftime('%A, %B %d')}"
-    body = format_email(weather, menu)
+    menu = generate_jain_menu(dinner_forecast)
+
+    subject = f"Healthy Jain Dinner Plan – {datetime.now().strftime('%A, %B %d')} (Menu based on 7PM forecast)"
+    body = format_email(current_weather, dinner_forecast, menu)
 
     send_email(subject, body)
     print("Email sent successfully.")
