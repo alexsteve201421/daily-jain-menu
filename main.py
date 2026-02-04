@@ -9,22 +9,23 @@ import requests
 
 
 # -------------------------------------------------
-# STEP 1: Get dinner-time weather (closest to 7:00 PM local)
+# STEP 1: Get dinner-time weather (closest to 7:00 PM local time)
 # -------------------------------------------------
 def get_dinner_weather(location: str, api_key: str, dinner_hour_local: int = 19) -> dict:
     """
-    Pull OpenWeather 5-day/3-hour forecast and choose the entry closest to 7:00 PM LOCAL time
-    for the forecast city (handles DST via OpenWeather timezone offset).
+    Uses OpenWeather 5-day/3-hour forecast and selects the forecast entry closest
+    to dinner time (default 7:00 PM) in the CITY'S local time.
+    DST is handled via OpenWeather city timezone offset (seconds from UTC).
     """
     url = "https://api.openweathermap.org/data/2.5/forecast"
     params = {"q": location, "appid": api_key, "units": "imperial"}
 
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
-    data = response.json()
+    r = requests.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    data = r.json()
 
     city = data.get("city", {})
-    tz_offset_seconds = int(city.get("timezone", 0))  # seconds offset from UTC
+    tz_offset_seconds = int(city.get("timezone", 0))
     tz = timezone(timedelta(seconds=tz_offset_seconds))
 
     now_local = datetime.now(tz)
@@ -67,7 +68,7 @@ def get_dinner_weather(location: str, api_key: str, dinner_hour_local: int = 19)
 
 
 # -------------------------------------------------
-# STEP 2: Ask AI to create the Jain menu (STRICT JSON)
+# STEP 2: OpenAI generates a HEALTHY Jain menu (STRICT JSON)
 # -------------------------------------------------
 def generate_jain_menu(weather: dict) -> dict:
     api_key = os.environ["OPENAI_API_KEY"]
@@ -96,7 +97,7 @@ Create a COMPLETE Indian Jain dinner menu with:
 • 1 Main (include a simple side if appropriate)
 • 1 Dessert
 
-Adjust the menu to the weather:
+Make the menu fit the weather:
 - Cold / windy / rainy → warm, comforting foods
 - Hot / humid → lighter, cooling foods
 - Mild → balanced, healthy meal
@@ -147,15 +148,14 @@ Return STRICT JSON ONLY in this exact structure:
   "jain_compliance_notes": ["string"]
 }}
 
-RULES:
-- No onion, no garlic, no root vegetables.
+Rules:
+- Absolutely no onion, no garlic, no root vegetables.
 - Keep steps clear, specific, and cookable.
 - Use common household measurements (cups/tbsp/tsp).
-- Keep it healthy and weeknight-realistic.
 - Professional tone only.
 """
 
-    response = requests.post(
+    resp = requests.post(
         "https://api.openai.com/v1/responses",
         headers={
             "Authorization": f"Bearer {api_key}",
@@ -166,5 +166,146 @@ RULES:
             "input": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
- 
-::contentReference[oaicite:0]{index=0}
+            ],
+            "text": {"format": {"type": "json_object"}},
+        },
+        timeout=60,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    text = data["output"][0]["content"][0]["text"]
+    return json.loads(text)
+
+
+# -------------------------------------------------
+# STEP 3: Email send (Gmail SMTP)
+# -------------------------------------------------
+def send_email(subject: str, body: str) -> None:
+    email_from = os.environ["EMAIL_FROM"]
+    email_to = [e.strip() for e in os.environ["EMAIL_TO"].split(",") if e.strip()]
+    smtp_user = os.environ["SMTP_USER"]
+    smtp_pass = os.environ["SMTP_PASS"]
+
+    msg = EmailMessage()
+    msg["From"] = email_from
+    msg["To"] = ", ".join(email_to)
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    context = ssl.create_default_context()
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=context) as server:
+        server.login(smtp_user, smtp_pass)
+        server.send_message(msg)
+
+
+# -------------------------------------------------
+# STEP 4: Email formatting (professional)
+# -------------------------------------------------
+def format_email(weather: dict, menu: dict) -> str:
+    def section(title: str) -> str:
+        return f"\n{'=' * len(title)}\n{title}\n{'=' * len(title)}\n"
+
+    lines = []
+    lines.append(menu.get("title", "Tonight’s Healthy Jain Menu"))
+    lines.append("")
+    lines.append("Dinner-time Weather:")
+    lines.append(f"- Location: {weather.get('location')}")
+    lines.append(f"- Forecast (local): {weather.get('forecast_time_local')}")
+    lines.append(f"- Temp: {weather.get('temp_f')}°F (feels {weather.get('feels_like_f')}°F)")
+    lines.append(f"- Conditions: {weather.get('conditions')}")
+    lines.append(f"- Wind: {weather.get('wind_mph')} mph | Humidity: {weather.get('humidity_pct')}%")
+    lines.append("")
+    lines.append(menu.get("weather_fit_summary", ""))
+
+    a = menu["menu"]["appetizer"]
+    lines.append(section("APPETIZER"))
+    lines.append(f"{a['name']}  •  {a['time_minutes']} min  •  Serves {a['servings']}")
+    lines.append("\nIngredients:")
+    for i in a["ingredients"]:
+        lines.append(f"- {i}")
+    lines.append("\nSteps:")
+    for idx, s in enumerate(a["steps"], 1):
+        lines.append(f"{idx}. {s}")
+    if a.get("plating_note"):
+        lines.append(f"\nPlating note: {a['plating_note']}")
+
+    m = menu["menu"]["main"]
+    lines.append(section("MAIN"))
+    lines.append(f"{m['name']}  •  {m['time_minutes']} min  •  Serves {m['servings']}")
+    lines.append("\nIngredients:")
+    for i in m["ingredients"]:
+        lines.append(f"- {i}")
+    lines.append("\nSteps:")
+    for idx, s in enumerate(m["steps"], 1):
+        lines.append(f"{idx}. {s}")
+
+    side = m.get("side")
+    if side and side.get("name"):
+        lines.append("\nSide:")
+        lines.append(f"{side['name']}  •  {side.get('time_minutes', '?')} min")
+        lines.append("Ingredients:")
+        for i in side.get("ingredients", []):
+            lines.append(f"- {i}")
+        lines.append("Steps:")
+        for idx, s in enumerate(side.get("steps", []), 1):
+            lines.append(f"{idx}. {s}")
+
+    if m.get("plating_note"):
+        lines.append(f"\nPlating note: {m['plating_note']}")
+
+    d = menu["menu"]["dessert"]
+    lines.append(section("DESSERT"))
+    lines.append(f"{d['name']}  •  {d['time_minutes']} min  •  Serves {d['servings']}")
+    lines.append("\nIngredients:")
+    for i in d["ingredients"]:
+        lines.append(f"- {i}")
+    lines.append("\nSteps:")
+    for idx, s in enumerate(d["steps"], 1):
+        lines.append(f"{idx}. {s}")
+    if d.get("plating_note"):
+        lines.append(f"\nPlating note: {d['plating_note']}")
+
+    lines.append(section("SHOPPING LIST"))
+    shopping = menu.get("shopping_list", {})
+    for cat in ["produce", "pantry", "dairy", "spices"]:
+        items = shopping.get(cat, [])
+        if items:
+            lines.append(f"{cat.capitalize()}:")
+            for x in items:
+                lines.append(f"- {x}")
+            lines.append("")
+
+    notes = menu.get("jain_compliance_notes", [])
+    if notes:
+        lines.append(section("JAIN COMPLIANCE"))
+        for n in notes:
+            lines.append(f"- {n}")
+
+    return "\n".join(lines)
+
+
+# -------------------------------------------------
+# STEP 5: Main
+# -------------------------------------------------
+def main():
+    # Default location is Baltimore, MD, US — override by setting LOCATION secret
+    location = os.environ.get("LOCATION", "Baltimore,MD,US")
+
+    weather = get_dinner_weather(
+        location=location,
+        api_key=os.environ["OPENWEATHER_API_KEY"],
+        dinner_hour_local=19,  # 7 PM local
+    )
+
+    menu = generate_jain_menu(weather)
+
+    subject = f"Healthy Jain Dinner Plan – {datetime.now().strftime('%A, %B %d')}"
+    body = format_email(weather, menu)
+
+    send_email(subject, body)
+    print("Email sent successfully.")
+
+
+if __name__ == "__main__":
+    main()
